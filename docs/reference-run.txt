@@ -1,0 +1,570 @@
+
+====================================================================================================
+  SELF TEST -- the deterministic half, before anything expensive
+====================================================================================================
+  SELF TEST -- every pure suite, no database, no network
+  ------------------------------------------------------------------------------------------------
+  suite                      result     checks      ms  detail
+  ------------------------------------------------------------------------------------------------
+  test_break_demo            pass           14     509  test_break_demo: 14 checks passed
+  test_checks                pass           44     275  test_checks: 44 checks passed
+  test_normalize             pass           83     178  test_normalize: 83 checks passed
+  test_rules                 pass          274     210  test_rules: 274 checks passed
+  test_watermark             pass           50     311  test_watermark: 50 checks passed
+  ------------------------------------------------------------------------------------------------
+  5 suite(s), 465 checks, 1,483 ms
+  every suite passed
+
+====================================================================================================
+  BUILD SOURCE -- schema, seed, then enable change capture
+====================================================================================================
+  waiting for SQL Server at mssql:1433 (up to 180s; a cold start pulls a ~1.6 GB image and then runs recovery)
+   01_schema.sql
+   02a_seed_customers.sql
+   02b_seed_customers_generated.sql
+     stage=generated_families_inserted  customers_now=125
+     stage=customers_seeded  total=5000  distinct_persons=4951
+   02c_seed_advances.sql
+     stage=advances_seeded  total=8000  money_moved=5287  spellings_sqlserver_can_see=9  spellings_actually_present=15  customers_with_an_advance=3975
+     stage=trailing_space_exhibit  sqlserver_count_distinct=7997  rows_with_trailing_space=3  total_rows=8000
+     stage=status_spelling_spread  raw_spelling='APPROVED'  bytes=8  n=288
+     stage=status_spelling_spread  raw_spelling='approved'  bytes=8  n=306
+     stage=status_spelling_spread  raw_spelling='canceled'  bytes=8  n=286
+     stage=status_spelling_spread  raw_spelling='cancelled'  bytes=9  n=311
+     stage=status_spelling_spread  raw_spelling='declined'  bytes=8  n=306
+     stage=status_spelling_spread  raw_spelling='Declined'  bytes=8  n=321
+     stage=status_spelling_spread  raw_spelling='expired'  bytes=7  n=287
+     stage=status_spelling_spread  raw_spelling='funded'  bytes=6  n=915
+     stage=status_spelling_spread  raw_spelling='Funded'  bytes=6  n=952
+     stage=status_spelling_spread  raw_spelling='FUNDED '  bytes=7  n=894
+     stage=status_spelling_spread  raw_spelling='Paid Off'  bytes=8  n=867
+     stage=status_spelling_spread  raw_spelling='PAID OFF'  bytes=8  n=825
+     stage=status_spelling_spread  raw_spelling='paid_off'  bytes=8  n=834
+     stage=status_spelling_spread  raw_spelling='pending'  bytes=7  n=302
+     stage=status_spelling_spread  raw_spelling='Pending'  bytes=7  n=306
+   02d_seed_cards.sql
+     stage=cards_seeded  total_cards=7000  card_holding_customers=4601  customers_with_no_card=399  distinct_instruments=6997
+     stage=default_card_invariant  holders_without_exactly_one_default=0  card_holding_customers=4601
+     stage=shared_fingerprints  card_fingerprint=fp_a1  customers=2  actual_people=1  verdict=same person - genuine duplicate
+     stage=shared_fingerprints  card_fingerprint=fp_bps  customers=2  actual_people=2  verdict=DIFFERENT PEOPLE - fingerprint suggests, never proves
+     stage=shared_fingerprints  card_fingerprint=fp_kow  customers=2  actual_people=2  verdict=DIFFERENT PEOPLE - fingerprint suggests, never proves
+   02e_seed_append_only.sql
+     stage=transactions_seeded  total=250000  sum_amount_cents=1244899861  distinct_customers=5000  backdated_rows=12691  backdated_pct=5.08
+     stage=posted_at_monotonicity  rows_out_of_order=22268  rows_checked=250000
+     stage=customer_history_seeded  total=18000  orphan_rows=3  rows_holding_pii_history=11196
+     stage=scratch_table_seeded  total_rows=1200  reviewed_by_null=1200  reviewed_at_null=1200  batch_id_null=1200  score_null=1200
+     stage=scratch_deadness_evidence  indexes_count=0  key_constraints=0  inbound_fks=0  referencing_modules=0
+   03_enable_capture.sql
+     table_name=dbo.advances  track_columns_updated=False  current_version=0  min_valid_version=0
+     table_name=dbo.cards  track_columns_updated=False  current_version=0  min_valid_version=0
+     table_name=dbo.customers  track_columns_updated=False  current_version=0  min_valid_version=0
+
+====================================================================================================
+  RUN 1 -- initial load (snapshot read on the mutable tables)
+====================================================================================================
+  RUN 1
+  ------------------------------------------------------------------------------------------------
+  table              strategy         mode               read     ins    upd   del      KiB     ms
+  ------------------------------------------------------------------------------------------------
+  customers          change_tracking  snapshot          5,000   5,000      0     0    810.5  9,527
+  advances           change_tracking  snapshot          8,000   8,000      0     0   1142.2 11,805
+  cards              change_tracking  snapshot          7,000   7,000      0     0   1076.3 12,212
+  transactions       high_water       high_water      250,000 250,000      0     0  17823.0 297,473
+  customer_history   high_water       high_water       18,000  18,000      0     0   1545.1 21,216
+  ------------------------------------------------------------------------------------------------
+  TOTAL                                               288,000 288,000      0     0  22397.1 352,233
+
+====================================================================================================
+  IDENTITY 1 -- resolve the initial population
+====================================================================================================
+  IDENTITY RUN 1    resolved 2026-08-20 17:13:01    328 ms
+  ------------------------------------------------------------------------------------------------
+  customers in                     5,000
+  excluded as test data               14   removed BEFORE grouping, never after
+  groups formed                       35   proof tuple, plus manual_merge edges
+  rows merged away                    41   aliases -- no source row was rewritten
+  canonical customers out          4,945
+  review rows                          4   refused: a human decides, not this
+  manual decisions applied             0   from meta.manual_merge
+  canonical with bad contact           7   stated cost of no field-level coalescing
+  resolved with 2+ default cards        28   28 caused BY the merge, 0 already like that
+  ------------------------------------------------------------------------------------------------
+  CONTACT QUALITY -- counted over the population, test accounts out
+  refused as evidence, never repaired and never dropped: repairing a phone invents
+  a way to reach somebody, and dropping the row loses a real customer
+    email      4,986   placeholder 1  valid 4,985
+    phone      4,986   malformed 6  valid 4,980
+  ------------------------------------------------------------------------------------------------
+  REVIEW QUEUE -- nothing below was merged, and nothing below is merged without a human
+    review_id 6970446920319683101   test_pattern_with_money
+      customers C4973
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7990 principal 0.00 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7990 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 8410834582038076157   test_pattern_with_money
+      customers C4974
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7991 principal 999999.99 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7991 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 2120675917054175833   two_funded_different_instrument
+      customers C1298,C4903   key 5501|1990-12-01|raghavan
+      DIFFERENT funding instruments across the money-moved members (2 distinct repayment
+      accounts, listed in full below). For a cash-advance lender that is a first-party fraud
+      signal, not a data-quality ticket: merging these records destroys the evidence of a
+      possible loss event. REFUSED -- a human decides. C1298: advance 1877 funded instrument
+      1111111111111111111111111111111111111111111111111111111111111111; C4903: advance 7402
+      funded instrument 2222222222222222222222222222222222222222222222222222222222222222;
+      suggestive signals agreeing (never a merge basis, context only): surname
+    review_id 6239652530278529328   two_funded_same_instrument
+      customers C777,C3512   key 8130|1994-07-22|adeyemi
+      SAME funding instrument (one repayment account, listed in full below) -- most likely one
+      person with two records, but two money-moved members means an auto-merge would move
+      somebody's borrowing history on the resolver's own authority. REFUSED -- a human
+      confirms, and meta.manual_merge is where that decision goes. C777: advance 455 funded
+      instrument 9999999999999999999999999999999999999999999999999999999999999999; C3512:
+      advance 6031 funded instrument
+      9999999999999999999999999999999999999999999999999999999999999999; suggestive signals
+      agreeing (never a merge basis, context only): address, surname
+
+====================================================================================================
+  CHURN DAY 1 -- simulating one day of source activity
+====================================================================================================
+     stage=churn_day1  customers_now=4988  advances_now=8020  cards_now=7000  transactions_now=252800  history_now=19200
+     stage=soft_delete_trap  rows_flagged_deleted=0  rows_actually_hard_deleted_today=13
+     stage=orphan_cards  orphan_cards=18
+
+====================================================================================================
+  RUN 2 -- incremental (change feed + closed high-water window)
+====================================================================================================
+  RUN 2
+  ------------------------------------------------------------------------------------------------
+  table              strategy         mode               read     ins    upd   del      KiB     ms
+  ------------------------------------------------------------------------------------------------
+  customers          change_tracking  change_tracking      99       1     85    13     14.4    186
+  advances           change_tracking  change_tracking      50      20     30     0      8.8     87
+  cards              change_tracking  change_tracking      30       0     30     0      4.6     67
+  transactions       high_water       high_water        2,800   2,800      0     0    199.5  3,283
+  customer_history   high_water       high_water        1,200   1,200      0     0    100.6  1,398
+  ------------------------------------------------------------------------------------------------
+  TOTAL                                                 4,179   4,021    145    13    327.9  5,021
+
+====================================================================================================
+  IDENTITY 2 -- RE-DERIVED from current state, never patched forward
+====================================================================================================
+  IDENTITY RUN 2    resolved 2026-08-20 17:13:14    329 ms
+  ------------------------------------------------------------------------------------------------
+  customers in                     4,988
+  excluded as test data               14   removed BEFORE grouping, never after
+  groups formed                       35   proof tuple, plus manual_merge edges
+  rows merged away                    42   aliases -- no source row was rewritten
+  canonical customers out          4,932
+  review rows                          4   refused: a human decides, not this
+  manual decisions applied             0   from meta.manual_merge
+  canonical with bad contact           7   stated cost of no field-level coalescing
+  resolved with 2+ default cards        28   28 caused BY the merge, 0 already like that
+  ------------------------------------------------------------------------------------------------
+  CONTACT QUALITY -- counted over the population, test accounts out
+  refused as evidence, never repaired and never dropped: repairing a phone invents
+  a way to reach somebody, and dropping the row loses a real customer
+    email      4,974   placeholder 1  valid 4,973
+    phone      4,974   malformed 6  valid 4,968
+  ------------------------------------------------------------------------------------------------
+  REVIEW QUEUE -- nothing below was merged, and nothing below is merged without a human
+    review_id 6970446920319683101   test_pattern_with_money
+      customers C4973
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7990 principal 0.00 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7990 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 8410834582038076157   test_pattern_with_money
+      customers C4974
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7991 principal 999999.99 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7991 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 2120675917054175833   two_funded_different_instrument
+      customers C1298,C4903   key 5501|1990-12-01|raghavan
+      DIFFERENT funding instruments across the money-moved members (2 distinct repayment
+      accounts, listed in full below). For a cash-advance lender that is a first-party fraud
+      signal, not a data-quality ticket: merging these records destroys the evidence of a
+      possible loss event. REFUSED -- a human decides. C1298: advance 1877 funded instrument
+      1111111111111111111111111111111111111111111111111111111111111111; C4903: advance 7402
+      funded instrument 2222222222222222222222222222222222222222222222222222222222222222;
+      suggestive signals agreeing (never a merge basis, context only): surname
+    review_id 6239652530278529328   two_funded_same_instrument
+      customers C777,C3512   key 8130|1994-07-22|adeyemi
+      SAME funding instrument (one repayment account, listed in full below) -- most likely one
+      person with two records, but two money-moved members means an auto-merge would move
+      somebody's borrowing history on the resolver's own authority. REFUSED -- a human
+      confirms, and meta.manual_merge is where that decision goes. C777: advance 455 funded
+      instrument 9999999999999999999999999999999999999999999999999999999999999999; C3512:
+      advance 6031 funded instrument
+      9999999999999999999999999999999999999999999999999999999999999999; suggestive signals
+      agreeing (never a merge basis, context only): address, surname
+
+====================================================================================================
+  CHURN DAY 2 -- simulating one day of source activity
+====================================================================================================
+     stage=churn_day2  customers_now=4984  advances_now=8021  cards_now=6999  transactions_now=253700  history_now=19600
+     stage=unmerge_trigger  customer_id=1777  advance_id=4408  status=funded  instrument=dddddddd  funded_at=2026-07-20T10:00:00
+     stage=unmerge_trigger  customer_id=5002  advance_id=8500  status=funded  instrument=cccccccc  funded_at=2026-08-20T09:00:00
+     stage=zero_card_customer  customer_id=75  cards_now=0
+
+====================================================================================================
+  RUN 3 -- incremental
+====================================================================================================
+  RUN 3
+  ------------------------------------------------------------------------------------------------
+  table              strategy         mode               read     ins    upd   del      KiB     ms
+  ------------------------------------------------------------------------------------------------
+  customers          change_tracking  change_tracking      24       0     20     4      3.2     55
+  advances           change_tracking  change_tracking       1       1      0     0      0.2     12
+  cards              change_tracking  change_tracking       1       0      0     1      0.0      8
+  transactions       high_water       high_water          900     900      0     0     64.3  1,035
+  customer_history   high_water       high_water          400     400      0     0     32.9    457
+  ------------------------------------------------------------------------------------------------
+  TOTAL                                                 1,326   1,301     20     5    100.6  1,567
+
+====================================================================================================
+  IDENTITY 3 -- G13 now has two money-moved members, so its merge is WITHDRAWN
+====================================================================================================
+  IDENTITY RUN 3    resolved 2026-08-20 17:13:35    339 ms
+  ------------------------------------------------------------------------------------------------
+  customers in                     4,984
+  excluded as test data               14   removed BEFORE grouping, never after
+  groups formed                       35   proof tuple, plus manual_merge edges
+  rows merged away                    39   aliases -- no source row was rewritten
+  canonical customers out          4,931
+  review rows                          5   refused: a human decides, not this
+  manual decisions applied             0   from meta.manual_merge
+  canonical with bad contact           7   stated cost of no field-level coalescing
+  resolved with 2+ default cards        27   27 caused BY the merge, 0 already like that
+  ------------------------------------------------------------------------------------------------
+  CONTACT QUALITY -- counted over the population, test accounts out
+  refused as evidence, never repaired and never dropped: repairing a phone invents
+  a way to reach somebody, and dropping the row loses a real customer
+    email      4,970   placeholder 1  valid 4,969
+    phone      4,970   malformed 6  valid 4,964
+  ------------------------------------------------------------------------------------------------
+  REVIEW QUEUE -- nothing below was merged, and nothing below is merged without a human
+    review_id 6970446920319683101   test_pattern_with_money
+      customers C4973
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7990 principal 0.00 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7990 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 8410834582038076157   test_pattern_with_money
+      customers C4974
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7991 principal 999999.99 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7991 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 4232644823949195028   two_funded_different_instrument
+      customers C21,C1777,C3260,C5002   key 6640|1985-02-25|duarte
+      DIFFERENT funding instruments across the money-moved members (2 distinct repayment
+      accounts, listed in full below). For a cash-advance lender that is a first-party fraud
+      signal, not a data-quality ticket: merging these records destroys the evidence of a
+      possible loss event. REFUSED -- a human decides. C1777: advance 4408 funded instrument
+      dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd; C5002: advance 8500
+      funded instrument cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc;
+      suggestive signals agreeing (never a merge basis, context only): address, surname
+    review_id 2120675917054175833   two_funded_different_instrument
+      customers C1298,C4903   key 5501|1990-12-01|raghavan
+      DIFFERENT funding instruments across the money-moved members (2 distinct repayment
+      accounts, listed in full below). For a cash-advance lender that is a first-party fraud
+      signal, not a data-quality ticket: merging these records destroys the evidence of a
+      possible loss event. REFUSED -- a human decides. C1298: advance 1877 funded instrument
+      1111111111111111111111111111111111111111111111111111111111111111; C4903: advance 7402
+      funded instrument 2222222222222222222222222222222222222222222222222222222222222222;
+      suggestive signals agreeing (never a merge basis, context only): surname
+    review_id 6239652530278529328   two_funded_same_instrument
+      customers C777,C3512   key 8130|1994-07-22|adeyemi
+      SAME funding instrument (one repayment account, listed in full below) -- most likely one
+      person with two records, but two money-moved members means an auto-merge would move
+      somebody's borrowing history on the resolver's own authority. REFUSED -- a human
+      confirms, and meta.manual_merge is where that decision goes. C777: advance 455 funded
+      instrument 9999999999999999999999999999999999999999999999999999999999999999; C3512:
+      advance 6031 funded instrument
+      9999999999999999999999999999999999999999999999999999999999999999; suggestive signals
+      agreeing (never a merge basis, context only): address, surname
+
+====================================================================================================
+  RUN 4 -- replay with ZERO churn (idempotency: everything should read 0)
+====================================================================================================
+  RUN 4
+  ------------------------------------------------------------------------------------------------
+  table              strategy         mode               read     ins    upd   del      KiB     ms
+  ------------------------------------------------------------------------------------------------
+  customers          change_tracking  change_tracking       0       0      0     0      0.0      7
+  advances           change_tracking  change_tracking       0       0      0     0      0.0      6
+  cards              change_tracking  change_tracking       0       0      0     0      0.0      6
+  transactions       high_water       high_water            0       0      0     0      0.0      2
+  customer_history   high_water       high_water            0       0      0     0      0.0      2
+  ------------------------------------------------------------------------------------------------
+  TOTAL                                                     0       0      0     0      0.0     23
+
+====================================================================================================
+  IDENTITY 4 -- same input as IDENTITY 3, so the map must come out identical
+====================================================================================================
+  IDENTITY RUN 4    resolved 2026-08-20 17:13:42    323 ms
+  ------------------------------------------------------------------------------------------------
+  customers in                     4,984
+  excluded as test data               14   removed BEFORE grouping, never after
+  groups formed                       35   proof tuple, plus manual_merge edges
+  rows merged away                    39   aliases -- no source row was rewritten
+  canonical customers out          4,931
+  review rows                          5   refused: a human decides, not this
+  manual decisions applied             0   from meta.manual_merge
+  canonical with bad contact           7   stated cost of no field-level coalescing
+  resolved with 2+ default cards        27   27 caused BY the merge, 0 already like that
+  ------------------------------------------------------------------------------------------------
+  CONTACT QUALITY -- counted over the population, test accounts out
+  refused as evidence, never repaired and never dropped: repairing a phone invents
+  a way to reach somebody, and dropping the row loses a real customer
+    email      4,970   placeholder 1  valid 4,969
+    phone      4,970   malformed 6  valid 4,964
+  ------------------------------------------------------------------------------------------------
+  REVIEW QUEUE -- nothing below was merged, and nothing below is merged without a human
+    review_id 6970446920319683101   test_pattern_with_money
+      customers C4973
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7990 principal 0.00 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7990 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 8410834582038076157   test_pattern_with_money
+      customers C4974
+      test pattern rule C fired, but money has moved and money OUTRANKS test-account
+      exclusion: this customer stays in the population and a human decides. Excluding them
+      removes real money from the book, silently. Detail: C: ssn 0000 with dob 1900-01-01;
+      advance 7991 principal 999999.99 -- NOT EXCLUDED: this customer has moved money, which
+      outranks every test-data pattern. advance 7991 funded instrument
+      0000000000000000000000000000000000000000000000000000000000000000
+    review_id 4232644823949195028   two_funded_different_instrument
+      customers C21,C1777,C3260,C5002   key 6640|1985-02-25|duarte
+      DIFFERENT funding instruments across the money-moved members (2 distinct repayment
+      accounts, listed in full below). For a cash-advance lender that is a first-party fraud
+      signal, not a data-quality ticket: merging these records destroys the evidence of a
+      possible loss event. REFUSED -- a human decides. C1777: advance 4408 funded instrument
+      dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd; C5002: advance 8500
+      funded instrument cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc;
+      suggestive signals agreeing (never a merge basis, context only): address, surname
+    review_id 2120675917054175833   two_funded_different_instrument
+      customers C1298,C4903   key 5501|1990-12-01|raghavan
+      DIFFERENT funding instruments across the money-moved members (2 distinct repayment
+      accounts, listed in full below). For a cash-advance lender that is a first-party fraud
+      signal, not a data-quality ticket: merging these records destroys the evidence of a
+      possible loss event. REFUSED -- a human decides. C1298: advance 1877 funded instrument
+      1111111111111111111111111111111111111111111111111111111111111111; C4903: advance 7402
+      funded instrument 2222222222222222222222222222222222222222222222222222222222222222;
+      suggestive signals agreeing (never a merge basis, context only): surname
+    review_id 6239652530278529328   two_funded_same_instrument
+      customers C777,C3512   key 8130|1994-07-22|adeyemi
+      SAME funding instrument (one repayment account, listed in full below) -- most likely one
+      person with two records, but two money-moved members means an auto-merge would move
+      somebody's borrowing history on the resolver's own authority. REFUSED -- a human
+      confirms, and meta.manual_merge is where that decision goes. C777: advance 455 funded
+      instrument 9999999999999999999999999999999999999999999999999999999999999999; C3512:
+      advance 6031 funded instrument
+      9999999999999999999999999999999999999999999999999999999999999999; suggestive signals
+      agreeing (never a merge basis, context only): address, surname
+
+====================================================================================================
+  LOAD HISTORY -- every number below is a side effect of running, not a claim
+====================================================================================================
+  run table              mode                read      ins    upd   del       KiB     ms
+  --------------------------------------------------------------------------------------------
+    1 advances           snapshot           8,000    8,000      0     0    1142.2 11,805
+    1 cards              snapshot           7,000    7,000      0     0    1076.3 12,212
+    1 customer_history   high_water        18,000   18,000      0     0    1545.1 21,216
+    1 customers          snapshot           5,000    5,000      0     0     810.5  9,527
+    1 transactions       high_water       250,000  250,000      0     0   17823.0 297,473
+    2 advances           change_tracking       50       20     30     0       8.8     87
+    2 cards              change_tracking       30        0     30     0       4.6     67
+    2 customer_history   high_water         1,200    1,200      0     0     100.6  1,398
+    2 customers          change_tracking       99        1     85    13      14.4    186
+    2 transactions       high_water         2,800    2,800      0     0     199.5  3,283
+    3 advances           change_tracking        1        1      0     0       0.2     12
+    3 cards              change_tracking        1        0      0     1       0.0      8
+    3 customer_history   high_water           400      400      0     0      32.9    457
+    3 customers          change_tracking       24        0     20     4       3.2     55
+    3 transactions       high_water           900      900      0     0      64.3  1,035
+    4 advances           change_tracking        0        0      0     0       0.0      6
+    4 cards              change_tracking        0        0      0     0       0.0      6
+    4 customer_history   high_water             0        0      0     0       0.0      2
+    4 customers          change_tracking        0        0      0     0       0.0      7
+    4 transactions       high_water             0        0      0     0       0.0      2
+
+====================================================================================================
+  RECONCILIATION -- does the warehouse say what the source says?
+====================================================================================================
+  REPLICATION SCORECARD -- both sides read, not just the loader's own log
+  ------------------------------------------------------------------------------------------------
+  check                    verdict       detail
+  ------------------------------------------------------------------------------------------------
+  key parity               PASS          customers          4,984 keys matched
+                                         advances           8,021 keys matched
+                                         cards              6,999 keys matched
+                                         transactions       253,700 keys matched
+                                         customer_history   19,600 keys matched
+  value parity             PASS          customers          37 column aggregate(s) agree
+                                         advances           26 column aggregate(s) agree; 2 column(s) omitted
+                                         advances           OMITTED advances.principal_amount (float): FLOAT is not summable reproducibly -- stated, not reconciled with a tolerance and called a pass
+                                         advances           OMITTED advances.fee_amount (float): FLOAT is not summable reproducibly -- stated, not reconciled with a tolerance and called a pass
+                                         cards              34 column aggregate(s) agree
+                                         transactions       26 column aggregate(s) agree
+                                         customer_history   19 column aggregate(s) agree
+  append-only              PASS          transactions: frozen segment transaction_id <= 253,700 agrees on row count and 4 summable column(s)
+                                         customer_history: frozen segment history_id <= 19,600 agrees on row count and 2 summable column(s)
+                                         WHAT THIS CANNOT SEE: only changes that move a sum. Two edits inside the frozen segment that cancel exactly (+500 and -500) pass this check, and a same-length text change is not summed at all.
+  contiguity               PASS          transactions: window transaction_id <= 253,700 is DENSE -- 253,700 rows across ids 1..253,700, so no id below the watermark is missing
+                                         customer_history: window history_id <= 19,600 is DENSE -- 19,600 rows across ids 1..19,600, so no id below the watermark is missing
+                                         WHAT THIS CANNOT SEE: a gap BELOW the lowest id present. MIN comes from the rows that are there, so an id missing underneath it leaves no trace. The top end needs no such caveat -- the ceiling is always an id the snapshot could see, so MAX inside the window is the watermark itself.
+  referential integrity    SOURCE-DIRTY  advances.customer_id -> customers: no orphans on either side
+                                         cards.customer_id -> customers: 13 value(s) orphaned in BOTH -- the source really is like that and it was replicated faithfully. Ids: 161, 1074, 1371, 2067, 2183, 2241, 2405, 2464, 3032, 4064, 4065, 4126, ... (13 total)
+                                         transactions.customer_id -> customers: 17 value(s) orphaned in BOTH -- the source really is like that and it was replicated faithfully. Ids: 161, 363, 1064, 1074, 1371, 2067, 2183, 2241, 2405, 2464, 3032, 3153, ... (17 total)
+                                         customer_history.customer_id -> customers: 20 value(s) orphaned in BOTH -- the source really is like that and it was replicated faithfully. Ids: 161, 363, 1064, 1074, 1371, 2067, 2183, 2241, 2405, 2464, 3032, 3153, ... (20 total)
+                                         SOURCE-DIRTY is not a failure. Repairing these in flight would hide a source problem behind a clean-looking warehouse, so they are reported and kept.
+  ------------------------------------------------------------------------------------------------
+  OVERALL SOURCE-DIRTY   exit 0
+
+  SOURCE-DIRTY, and exiting 0 on purpose: the two sides AGREE. What they
+  agree on includes rows the source itself has orphaned. That is a finding
+  about the source, not a replication defect, and the alternative -- failing
+  the build on it -- would need a hardcoded expected-orphan count that goes
+  stale the first time the source changes.
+
+====================================================================================================
+  IDENTITY SCORE -- graded against a column the warehouse never replicated
+====================================================================================================
+  READ THIS FIRST
+  This is a SELF-CONSISTENCY CHECK, not a measurement. The same author wrote the fixture and the
+  rules that read it, so a precision of 1.000 says the rules do what the fixture was built to
+  require -- nothing more. Measuring precision on Fundo's real book needs a labelled sample of
+  real duplicates, adjudicated by someone who did not write the rules.
+
+  POPULATION AND GROUND TRUTH -- counted from this run, none asserted
+  --------------------------------------------------------------------------------------------------
+  customers in the warehouse mirror                                 4,984
+  excluded as test accounts before resolution                          14
+  population that reached resolution                                4,970
+  duplicate groups in that population (2+ rows, one person)            41
+  rows inside those groups                                             91
+  truth pairs (every within-person pair)                               61
+
+  RESOLUTION SCORE -- PAIRS, not groups
+  --------------------------------------------------------------------------------------------------
+  rule set                                                 prop   corr  wrong   miss    prec     rec
+  --------------------------------------------------------------------------------------------------
+  SHIPPED (meta.customer_map)                                47     47      0     14   1.000   0.770
+  CF-1 email promoted to PROVES                              51     49      2     12   0.961   0.803
+  CF-2 placeholder gate removed                              47     47      0     14   1.000   0.770
+  CF-3 first_name added to the proof tuple                   47     47      0     14   1.000   0.770
+  CF-4 last_name dropped from the proof tuple                49     48      1     13   0.980   0.787
+  CF-5 test-account exclusion moved to AFTER resolution      47     47      0     14   1.000   0.770
+  CF-6 naive '%test%' filter                                 47     47      0     14   1.000   0.770
+  --------------------------------------------------------------------------------------------------
+
+  WHAT EACH REMOVED RULE COSTS -- one rule removed, re-resolved, re-scored
+  --------------------------------------------------------------------------------------------------
+  CF-1 email promoted to PROVES
+       introduces 2 wrong pair(s) (C2044+C2045, C3311+C3312); recovers 2 true pair(s)
+       (C0203+C3844, C1120+C2957). email identifies a MAILBOX, not a person: a household shares
+       one and an accounts-receivable inbox is shared by coworkers, so a wrong edge here can
+       attach one person's paid-off advance to a different human being.
+
+  CF-2 placeholder gate removed
+       changes NOTHING on this fixture -- no pair moves in either direction and the scored
+       population is identical, so this fixture does not price the rule and the rule's value here
+       rests on argument rather than on measurement. a placeholder is a value that many unrelated
+       people share, so promoting it to evidence merges strangers with exactly the confidence used
+       for real matches.
+
+  CF-3 first_name added to the proof tuple
+       changes NOTHING on this fixture -- no pair moves in either direction and the scored
+       population is identical, so this fixture does not price the rule and the rule's value here
+       rests on argument rather than on measurement. a person's given name is the field most
+       likely to be a nickname, so requiring it trades recall for nothing a stronger component
+       does not already provide.
+
+  CF-4 last_name dropped from the proof tuple
+       introduces 1 wrong pair(s) (C0654+C3078); recovers 1 true pair(s) (C2680+C4471).
+       (ssn_last4, date_of_birth) alone is not identity -- surname is the only component
+       separating a chance collision from a duplicate, and dropping it buys the marriage-rename
+       case by paying with unrelated people.
+
+  CF-5 test-account exclusion moved to AFTER resolution
+       scores 14 MORE customer(s) than the baseline (C4960, C4961, C4962, C4963, C4964, C4965,
+       C4966, C4967). synthetic accounts share the artifact values a form emits, so resolving
+       before removing them lets those artifacts act as proof; and a later exclusion cannot un-
+       write a merge the map already contains. The stage order alone moves nothing here because
+       the placeholder gate in normalize.py refuses the artifact values independently -- the
+       ordering is currently protected TWICE, and neither defence is visible from the other.
+       Removing BOTH defences and running the same swapped order proposes 5 wrong pair(s)
+       (C4960+C4968, C4965+C4967, C4965+C4969, C4967+C4969, C4971+C4972) -- precision 0.904
+       against 1.000 shipped. That is the priced version of this invariant on this fixture: it is
+       paid jointly, not singly.
+
+  CF-6 naive '%test%' filter
+       scores 7 FEWER customer(s) than the baseline (C0402, C1188, C1902, C2733, C3560, C4318,
+       C4501) -- the denominator moved with them, so its pair figures are not comparable to the
+       baseline's; scores 7 MORE customer(s) than the baseline (C4965, C4966, C4967, C4968, C4969,
+       C4970, C4972). '%test%' is a substring of real surnames and real mailbox names, so it
+       deletes real customers -- including funded ones, which removes real money from the book
+       with no error anywhere. AS A DETECTOR: naive flags 14 customer(s), 7 of them real people
+       (C0402, C1188, C1902, C2733, C3560, C4318, C4501) -- precision 0.500, catching 7 of 16
+       synthetic accounts. The shipped three rules flag 14, 0 of them real people -- precision
+       1.000, catching 14 of 16.
+
+  TRUTH PAIRS THE SHIPPED RULES DID NOT PROPOSE -- 14, each reason derived from the rows
+  --------------------------------------------------------------------------------------------------
+  C0021,C1777  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               address, surname
+  C0021,C3260  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               address, surname
+  C0021,C5002  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               address, surname
+  C0057,C0059  no proof tuple: C0059 [date_of_birth missing] | weak signals agreeing: address,
+               surname
+  C0058,C0060  no proof tuple: C0060 [date_of_birth missing] | weak signals agreeing: address,
+               surname
+  C0203,C3844  no proof tuple: C0203 [ssn_last4 missing] | weak signals agreeing: email, address,
+               surname
+  C0777,C3512  refused by the resolver: two_funded_same_instrument | weak signals agreeing:
+               address, surname
+  C1120,C2957  proof tuples disagree: date_of_birth '1987-04-11' vs '1987-11-04' | weak signals
+               agreeing: email, phone, address, surname
+  C1298,C4903  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               surname
+  C1777,C3260  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               address, surname
+  C1777,C5002  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               address, surname
+  C1866,C4290  no proof tuple: C1866 [ssn_last4 missing] | weak signals agreeing: phone, address,
+               surname
+  C2680,C4471  proof tuples disagree: last_name 'nowak' vs 'nowak-brennan' | weak signals
+               agreeing: phone, address
+  C3260,C5002  refused by the resolver: two_funded_different_instrument | weak signals agreeing:
+               address, surname
+
+  FINDINGS -- reported, not suppressed
+  --------------------------------------------------------------------------------------------------
+  * the 14 missed pair(s) break down as 4 no proof tuple; 2 proof tuples disagree; 8 refused by
+    the resolver. This breakdown is derived from this run, not compared against an expected count
+    -- the honest total moves with the population, and after a churn day it moves a lot: a refused
+    group of n money-moved members contributes n*(n-1)/2 missed pairs on its own.

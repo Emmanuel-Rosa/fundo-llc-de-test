@@ -1,0 +1,20 @@
+# Everything in this repo is consumed by a Linux container. A CRLF line ending in a
+# mounted .sql or .py file fails with an error that looks nothing like its cause
+# (sqlcmd reports a syntax error at a line that is visibly correct; python reports
+# "\r: command not found"). This file is the fix, and it must exist before the first
+# commit -- .gitattributes does not retroactively normalize already-committed blobs.
+* text=auto eol=lf
+
+*.sql   text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf
+Dockerfile text eol=lf
+.env.example text eol=lf
+
+# Recorded terminal transcripts are evidence -- never normalize them.
+docs/*.log -text

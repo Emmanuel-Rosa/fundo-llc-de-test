@@ -1,0 +1,177 @@
+# ═══════════════════════════════════════════════════════════════════════════════════
+# THE REPLICATION MANIFEST -- default-deny.
+#
+# A source table absent from this file is not replicated. Nothing scans the source
+# catalogue and copies what it finds. Two consequences worth stating, because this one
+# choice does most of the governance work in the whole exercise:
+#
+#   1. Dropping the abandoned scratch table from the pipeline is not a one-time
+#      cleanup, it is a STANDING CONTROL. A future `tmp_` table someone leaves behind
+#      is excluded the day it is created, by default, with no one noticing it needs to
+#      be. The alternative -- copy everything, then maintain a blocklist -- is a
+#      control that fails silently in the expensive direction.
+#
+#   2. The scorecard reports every source table NOT in this file, so exclusion is
+#      always a visible decision rather than an omission. Default-deny without that
+#      report is just a way to lose a table quietly.
+#
+# Columns are also an explicit allow-list, not `SELECT *`. That is what keeps the
+# ground-truth column `_seed_person_id` out of the warehouse: it is not excluded by a
+# rule that could have a bug, it is absent because it was never named. The identity
+# resolver physically cannot read it, which is the only way the precision numbers mean
+# anything at all.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+source_database: fundo_src
+
+tables:
+
+  # ─────────────────────────────────────────────────────────────────────────────────
+  # CHANGE TRACKING -- small, mutable, and hard-deleted.
+  #
+  # Chosen because these three tables are the only ones where a row can change or
+  # VANISH after it is written. Deletes are the half that watermark strategies cannot
+  # do at all: a deleted row leaves nothing behind to have a high watermark on.
+  # ─────────────────────────────────────────────────────────────────────────────────
+  customers:
+    strategy: change_tracking
+    primary_key: [customer_id]
+    # ~1.7% of rows change per day, including 13 hard deletes on churn day 1 --
+    # measured, and printed each run in ops.load_run.
+    columns:
+      - customer_id
+      - first_name
+      - last_name
+      - email
+      - phone
+      - ssn_last4
+      - date_of_birth
+      - address_line1
+      - city
+      - state_code
+      - postal_code
+      - employer_name
+      - signup_channel
+      - created_at
+      - updated_at
+      - is_deleted
+      # _seed_person_id is deliberately NOT listed. See the header.
+
+  advances:
+    strategy: change_tracking
+    primary_key: [advance_id]
+    columns:
+      - advance_id
+      - customer_id
+      - external_advance_id
+      - status
+      - principal_amount
+      - fee_amount
+      - funded_at
+      - paid_off_at
+      - repayment_account_hash
+      - created_at
+      - updated_at
+
+  cards:
+    strategy: change_tracking
+    primary_key: [card_id]
+    columns:
+      - card_id
+      - customer_id
+      - card_token
+      - card_fingerprint
+      - brand
+      - last4
+      - exp_month
+      - exp_year
+      - is_default
+      - billing_postal
+      - created_at
+      - updated_at
+
+  # ─────────────────────────────────────────────────────────────────────────────────
+  # BOUNDED HIGH-WATER MARK -- append-only, and large.
+  #
+  # The watermark is the clustered IDENTITY key, NOT a timestamp. posted_at exists and
+  # is indexed and is the obvious choice, and it is wrong: it is not monotonic with the
+  # key, because 150 of each day's 2,800 inserts are backdated. A posted_at watermark
+  # loses 5.4% of each day's rows, permanently, with no error.
+  #
+  # "Bounded" is load-bearing, and it is the bug this exercise is most likely to be
+  # testing. `WHERE id > last_id` looks obviously safe and is not: an IDENTITY value is
+  # assigned when the row is INSERTED, not when its transaction COMMITS, so under
+  # concurrent writes a lower id can become visible after a higher one. Read at that
+  # instant, take MAX(id), advance past it -- and the row that commits a moment later
+  # is below your watermark and is gone forever, silently.
+  #
+  # HALF the fix is a ceiling taken inside the same SNAPSHOT transaction as the read, so
+  # the window is (last_id, ceiling] with the ceiling being a value the snapshot can see
+  # rather than whatever is highest at the instant the read finishes. That closes the skew
+  # between the read and the stamp, and nothing else: a row still uncommitted when the
+  # snapshot opened, whose id sits BELOW an id that already committed, is invisible to the
+  # read AND below the ceiling. Measured, 50,000 cents in the lost row -- read
+  # high_water_ceiling's docstring before trusting this strategy in production. An upper
+  # bound cannot close a gap underneath it, and there is no MIN_ACTIVE_IDENTITY with which
+  # to put the ceiling below the in-flight writes.
+  #
+  # So what ships is the bound plus DETECTION: the scorecard's contiguity check counts the
+  # loaded window against MAX(id) - MIN(id) + 1 and names any gap. Bounds implemented in
+  # pipeline/source.py and asserted in tests/test_watermark.py.
+  # ─────────────────────────────────────────────────────────────────────────────────
+  transactions:
+    strategy: high_water
+    primary_key: [transaction_id]
+    watermark_column: transaction_id
+    # 250,000 rows = 86.8% of everything replicated, and ~1.1% of the daily change.
+    # That asymmetry is the entire argument for choosing per table instead of
+    # uniformly, and it only exists because one table dominates.
+    append_only_asserted: true   # verified every run, never assumed -- see checks/
+    columns:
+      - transaction_id
+      - customer_id
+      - advance_id
+      - direction
+      - amount_cents
+      - currency
+      - posted_at
+      - created_at
+
+  customer_history:
+    strategy: high_water
+    primary_key: [history_id]
+    watermark_column: history_id
+    # 18,000 rows growing +1,200/day = 6.67%/day: the fastest-growing table in the
+    # source. "History nobody prunes" is a measured number here, not a complaint.
+    append_only_asserted: true
+    columns:
+      - history_id
+      - customer_id
+      - changed_column
+      - old_value
+      - new_value
+      - changed_at
+      - changed_by
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# NOT REPLICATED -- recorded here so the decision is auditable, while the mechanism
+# that enforces it remains the absence of an entry above.
+#
+#   dbo.tmp_dedupe_backup_2019
+#     1,200 rows. Excluded. On a system I did not author, the evidence that a table is
+#     dead is: no primary key, no index, no foreign key referencing it; 4 of its 8
+#     columns are 100% NULL; MAX(reviewed_at) IS NULL and the newest row dates to
+#     2019-11-08; zero rows changed across both churn windows; and zero rows in
+#     sys.sql_modules whose definition contains the table name. The scorecard prints
+#     that evidence set every run.
+#
+#     What I would ALSO do on a real system, and cannot do in an eight-hour exercise:
+#     check sys.dm_db_index_usage_stats for a last user seek/scan/update, search Query
+#     Store for the table name, and then the honest one -- rename it and wait a month.
+#     A `tmp_` prefix is not evidence. Dropping on a prefix is how you delete the thing
+#     month-end reporting depends on.
+# ═══════════════════════════════════════════════════════════════════════════════════
+excluded_tables:
+  - name: tmp_dedupe_backup_2019
+    reason: abandoned 2019 dedupe scratch space; no owner, no reader, no constraints
+    evidence_probe: true    # the scorecard proves this rather than asserting it

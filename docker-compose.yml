@@ -1,0 +1,155 @@
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Fundo LLC change-capture exercise.
+#
+#   Happy path:   docker compose up --abort-on-container-exit --exit-code-from pipeline
+#   Break demo:   docker compose run --rm pipeline break
+#
+# THOSE FLAGS ARE NOT DECORATION, and the obvious alternative is wrong. Measured, both:
+#   --abort-on-container-failure  stops everything when a container exits NON-ZERO. On a
+#                                 SUCCESSFUL run it stops nothing, so `up` keeps streaming
+#                                 mssql forever and never returns. The demo finishes and
+#                                 the terminal just sits there.
+#   --abort-on-container-exit     stops everything when ANY container exits, which the
+#                                 one-shot pipeline always does.
+#   --exit-code-from pipeline     propagates the PIPELINE's exit code rather than compose's,
+#                                 which is what makes the scorecard's verdict the build's
+#                                 verdict. Without it a FAIL run can still return 0.
+#
+# Two commands, no Makefile and no mounted shell entrypoint. `make` is not present on
+# a default Windows box, and a mounted .sh fails on CRLF with a message that points
+# nowhere near the cause. Both are avoidable dependencies on the reviewer's machine.
+# ─────────────────────────────────────────────────────────────────────────────────────
+name: fundo-exercise
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────────────
+  # The source system. Stands in for Fundo's production SQL Server.
+  # ───────────────────────────────────────────────────────────────────────────────────
+  mssql:
+    # Pinned to a Cumulative Update tag, deliberately NOT `2022-latest` and
+    # emphatically NOT `2025-latest`:
+    #   * 2025 GA has an AVX dependency that hard-crashes under Rosetta on Apple
+    #     Silicon (fixed only in CU1), and it renamed the MSSQL_PID value `Developer`,
+    #     so a compose file copied from a 2022 example fails on a line that looks fine.
+    #   * `latest` is a moving target. The reviewer's numbers must be my numbers.
+    # There is no official arm64 image. Azure SQL Edge -- the workaround every blog
+    # post still recommends -- was retired 2025-09-30. On Apple Silicon this runs
+    # under emulation that Microsoft explicitly does not test; see README.
+    #
+    # Pinned by DIGEST as well as tag, both verified against the registry on
+    # 2026-08-18. Two things that verification established:
+    #   * the manifest is application/vnd.docker.distribution.manifest.v2+json --
+    #     a single-platform manifest, NOT a manifest list. That is the amd64-only
+    #     proof: a multi-arch image would necessarily be a list.
+    #   * `2022-latest` already resolves to a different digest
+    #     (sha256:90488d58c6a5...), i.e. a newer CU than this one. Pinning is what
+    #     keeps the reviewer's numbers identical to the ones in SOLUTION.md.
+    image: mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04@sha256:7c29dfbac885ad7519e219c7fe4aee0e67283e21a10e9c252d13b0fbde1866f8
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env - see .env.example}
+      MSSQL_PID: Developer
+      # SQL Server on Linux refuses to start below a 2 GB floor, and below it the
+      # container appears to boot and then dies with the reason buried in the log.
+      # Capping max server memory here keeps it inside a default Docker Desktop
+      # allocation instead of ballooning and being OOM-killed mid-seed.
+      #
+      # 4096, NOT 2048, and this was measured rather than chosen. At 2048 -- exactly ON
+      # the documented floor -- SQL Server 2022 CU20 starts, reports "Detected 2048 MB of
+      # RAM, 213 MB of available memory" and "In-Memory OLTP initialized on lowend
+      # machine", and then dies during startup with:
+      #
+      #     Message: Stack Overflow
+      #     Address: 0x3fff8401e08b
+      #     Stack Trace: sqlpal.dll+0x209C12 ... sqlpal.dll+0x3A0569
+      #
+      # It is NOT an OOM kill -- the host offered the engine 16.6 GB and no OOM killer
+      # fired. The floor is a floor for the SERVER, and leaving 213 MB of headroom inside
+      # it is not enough to finish booting. At 4096 the same image reports 3328 MB
+      # available and reaches "ready for client connections" every time.
+      #
+      # This is why the number is not left at the documented minimum: a value that is
+      # legal and technically above the floor still failed 100% of attempts on
+      # 2026-08-20 (Docker engine 29.7.2), while having worked on 2026-08-18. A limit
+      # that depends on the host's mood is not a limit a reviewer can reproduce.
+      #
+      # REVIEWER REQUIREMENT: Docker must be able to give this container ~5 GB. That is
+      # under the Docker Desktop default on any machine that can run the image at all.
+      MSSQL_MEMORY_LIMIT_MB: "4096"
+    ports:
+      # Exposed for the reviewer's own poking. Nothing in the pipeline uses it --
+      # containers talk over the compose network on 1433.
+      - "14330:1433"
+    volumes:
+      # A NAMED VOLUME, never a bind mount. A bind mount for /var/opt/mssql works on
+      # Docker Desktop (the VM owns the filesystem) and fails on native Linux with a
+      # permission error, because the container runs as uid 10001 mssql. That is a
+      # bug you never see on Windows and the reviewer always sees on Linux.
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      # Diagnostic only -- `depends_on` below waits on service_started, not
+      # service_healthy, and the pipeline does its own authoritative readiness wait
+      # in Python. Reason: sqlcmd's path moved to /opt/mssql-tools18/bin at 2022 CU14
+      # and some published images shipped with no tools directory at all
+      # (mssql-docker #892, #894). Gating startup on a healthcheck that cannot pass
+      # turns a cosmetic problem into a hang, and a hang has no error message.
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ───────────────────────────────────────────────────────────────────────────────────
+  # The pipeline. Owns the warehouse (DuckDB, a file in a named volume), applies the
+  # source schema and seed, runs the loads, resolves identity, and runs the checks.
+  # ───────────────────────────────────────────────────────────────────────────────────
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      mssql:
+        # service_started, NOT service_healthy -- see the healthcheck note above.
+        condition: service_started
+    environment:
+      FUNDO_MSSQL_HOST: mssql
+      FUNDO_MSSQL_PORT: "1433"
+      FUNDO_MSSQL_USER: sa
+      FUNDO_MSSQL_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env - see .env.example}
+      FUNDO_MSSQL_DB: fundo_src
+      FUNDO_WAREHOUSE_PATH: /warehouse/fundo_dw.duckdb
+      # Deterministic seed. The seed IS the measuring instrument: every number in
+      # SOLUTION.md comes out of it, so it must reproduce byte-for-byte.
+      FUNDO_SEED: "20260818"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - warehouse-data:/warehouse
+      # Source mounted read-only so the pipeline cannot rewrite its own inputs and
+      # quietly change the numbers it reports.
+      - ./sql:/app/sql:ro
+      - ./pipeline:/app/pipeline:ro
+      - ./tests:/app/tests:ro
+      - ./probes:/app/probes:ro
+      # Transcripts land on the host so a run is evidence, not scrollback.
+      - ./docs:/app/docs
+    # The whole demonstration is ONE sequenced process: schema -> seed -> enable
+    # capture -> run 1 (snapshot) -> churn day 1 -> run 2 -> churn day 2 -> run 3 ->
+    # run 4 (replay, zero churn) -> identity -> checks -> report.
+    #
+    # It is one process rather than a graph of compose services on purpose: compose
+    # `depends_on` orders STARTUP, it does not sequence COMPLETION of one-shot
+    # services, so an initial-load-then-incremental sequence cannot be expressed as
+    # a service DAG. Trying to is a well-disguised race.
+    # JUST the subcommand. The image already has ENTRYPOINT ["python", "-m", "pipeline"],
+    # and compose `command` replaces CMD while leaving ENTRYPOINT in place -- so the full
+    # form spelled out here produced `python -m pipeline python -m pipeline demo`, whose
+    # argv[1] is "python". main() fell through to the unknown-command branch, printed its
+    # own help and exited 2. `docker compose up` -- the first line of this file -- had
+    # therefore never run the demo even once. Measured, exit 2, not reasoned about.
+    command: ["demo"]
+
+volumes:
+  mssql-data:
+  warehouse-data:
