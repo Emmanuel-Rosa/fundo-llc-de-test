@@ -6,19 +6,21 @@
   ------------------------------------------------------------------------------------------------
   suite                      result     checks      ms  detail
   ------------------------------------------------------------------------------------------------
-  test_break_demo            pass           14     509  test_break_demo: 14 checks passed
-  test_checks                pass           44     275  test_checks: 44 checks passed
-  test_normalize             pass           83     178  test_normalize: 83 checks passed
-  test_rules                 pass          274     210  test_rules: 274 checks passed
-  test_watermark             pass           50     311  test_watermark: 50 checks passed
+  test_break_demo            pass           14     450  test_break_demo: 14 checks passed
+  test_checks                pass           44     309  test_checks: 44 checks passed
+  test_connect               pass           13     268  test_connect: 13 checks passed
+  test_normalize             pass           83     166  test_normalize: 83 checks passed
+  test_rules                 pass          274     205  test_rules: 274 checks passed
+  test_watermark             pass           50     285  test_watermark: 50 checks passed
   ------------------------------------------------------------------------------------------------
-  5 suite(s), 465 checks, 1,483 ms
+  6 suite(s), 478 checks, 1,683 ms
   every suite passed
 
 ====================================================================================================
   BUILD SOURCE -- schema, seed, then enable change capture
 ====================================================================================================
   waiting for SQL Server at mssql:1433 (up to 180s; a cold start pulls a ~1.6 GB image and then runs recovery)
+  SQL Server is answering but rejecting the login; on a fresh volume it does that for a few seconds while it creates its system databases. Retrying for up to 60s.
    01_schema.sql
    02a_seed_customers.sql
    02b_seed_customers_generated.sql
@@ -66,18 +68,18 @@
   ------------------------------------------------------------------------------------------------
   table              strategy         mode               read     ins    upd   del      KiB     ms
   ------------------------------------------------------------------------------------------------
-  customers          change_tracking  snapshot          5,000   5,000      0     0    810.5  9,527
-  advances           change_tracking  snapshot          8,000   8,000      0     0   1142.2 11,805
-  cards              change_tracking  snapshot          7,000   7,000      0     0   1076.3 12,212
-  transactions       high_water       high_water      250,000 250,000      0     0  17823.0 297,473
-  customer_history   high_water       high_water       18,000  18,000      0     0   1545.1 21,216
+  customers          change_tracking  snapshot          5,000   5,000      0     0    810.5  9,265
+  advances           change_tracking  snapshot          8,000   8,000      0     0   1142.2 12,391
+  cards              change_tracking  snapshot          7,000   7,000      0     0   1076.3 11,939
+  transactions       high_water       high_water      250,000 250,000      0     0  17823.0 313,347
+  customer_history   high_water       high_water       18,000  18,000      0     0   1545.1 21,553
   ------------------------------------------------------------------------------------------------
-  TOTAL                                               288,000 288,000      0     0  22397.1 352,233
+  TOTAL                                               288,000 288,000      0     0  22397.1 368,495
 
 ====================================================================================================
   IDENTITY 1 -- resolve the initial population
 ====================================================================================================
-  IDENTITY RUN 1    resolved 2026-08-20 17:13:01    328 ms
+  IDENTITY RUN 1    resolved 2026-08-20 19:17:50    339 ms
   ------------------------------------------------------------------------------------------------
   customers in                     5,000
   excluded as test data               14   removed BEFORE grouping, never after
@@ -146,18 +148,18 @@
   ------------------------------------------------------------------------------------------------
   table              strategy         mode               read     ins    upd   del      KiB     ms
   ------------------------------------------------------------------------------------------------
-  customers          change_tracking  change_tracking      99       1     85    13     14.4    186
-  advances           change_tracking  change_tracking      50      20     30     0      8.8     87
+  customers          change_tracking  change_tracking      99       1     85    13     14.4    197
+  advances           change_tracking  change_tracking      50      20     30     0      8.8     88
   cards              change_tracking  change_tracking      30       0     30     0      4.6     67
-  transactions       high_water       high_water        2,800   2,800      0     0    199.5  3,283
-  customer_history   high_water       high_water        1,200   1,200      0     0    100.6  1,398
+  transactions       high_water       high_water        2,800   2,800      0     0    199.5  3,428
+  customer_history   high_water       high_water        1,200   1,200      0     0    100.6  1,488
   ------------------------------------------------------------------------------------------------
-  TOTAL                                                 4,179   4,021    145    13    327.9  5,021
+  TOTAL                                                 4,179   4,021    145    13    327.9  5,268
 
 ====================================================================================================
   IDENTITY 2 -- RE-DERIVED from current state, never patched forward
 ====================================================================================================
-  IDENTITY RUN 2    resolved 2026-08-20 17:13:14    329 ms
+  IDENTITY RUN 2    resolved 2026-08-20 19:18:04    354 ms
   ------------------------------------------------------------------------------------------------
   customers in                     4,988
   excluded as test data               14   removed BEFORE grouping, never after
@@ -227,18 +229,18 @@
   ------------------------------------------------------------------------------------------------
   table              strategy         mode               read     ins    upd   del      KiB     ms
   ------------------------------------------------------------------------------------------------
-  customers          change_tracking  change_tracking      24       0     20     4      3.2     55
+  customers          change_tracking  change_tracking      24       0     20     4      3.2     57
   advances           change_tracking  change_tracking       1       1      0     0      0.2     12
   cards              change_tracking  change_tracking       1       0      0     1      0.0      8
-  transactions       high_water       high_water          900     900      0     0     64.3  1,035
-  customer_history   high_water       high_water          400     400      0     0     32.9    457
+  transactions       high_water       high_water          900     900      0     0     64.3  1,139
+  customer_history   high_water       high_water          400     400      0     0     32.9    572
   ------------------------------------------------------------------------------------------------
-  TOTAL                                                 1,326   1,301     20     5    100.6  1,567
+  TOTAL                                                 1,326   1,301     20     5    100.6  1,788
 
 ====================================================================================================
   IDENTITY 3 -- G13 now has two money-moved members, so its merge is WITHDRAWN
 ====================================================================================================
-  IDENTITY RUN 3    resolved 2026-08-20 17:13:35    339 ms
+  IDENTITY RUN 3    resolved 2026-08-20 19:18:27    328 ms
   ------------------------------------------------------------------------------------------------
   customers in                     4,984
   excluded as test data               14   removed BEFORE grouping, never after
@@ -309,18 +311,18 @@
   ------------------------------------------------------------------------------------------------
   table              strategy         mode               read     ins    upd   del      KiB     ms
   ------------------------------------------------------------------------------------------------
-  customers          change_tracking  change_tracking       0       0      0     0      0.0      7
-  advances           change_tracking  change_tracking       0       0      0     0      0.0      6
-  cards              change_tracking  change_tracking       0       0      0     0      0.0      6
-  transactions       high_water       high_water            0       0      0     0      0.0      2
-  customer_history   high_water       high_water            0       0      0     0      0.0      2
+  customers          change_tracking  change_tracking       0       0      0     0      0.0     10
+  advances           change_tracking  change_tracking       0       0      0     0      0.0     10
+  cards              change_tracking  change_tracking       0       0      0     0      0.0     10
+  transactions       high_water       high_water            0       0      0     0      0.0      5
+  customer_history   high_water       high_water            0       0      0     0      0.0      6
   ------------------------------------------------------------------------------------------------
-  TOTAL                                                     0       0      0     0      0.0     23
+  TOTAL                                                     0       0      0     0      0.0     41
 
 ====================================================================================================
   IDENTITY 4 -- same input as IDENTITY 3, so the map must come out identical
 ====================================================================================================
-  IDENTITY RUN 4    resolved 2026-08-20 17:13:42    323 ms
+  IDENTITY RUN 4    resolved 2026-08-20 19:18:33    392 ms
   ------------------------------------------------------------------------------------------------
   customers in                     4,984
   excluded as test data               14   removed BEFORE grouping, never after
@@ -389,26 +391,26 @@
 ====================================================================================================
   run table              mode                read      ins    upd   del       KiB     ms
   --------------------------------------------------------------------------------------------
-    1 advances           snapshot           8,000    8,000      0     0    1142.2 11,805
-    1 cards              snapshot           7,000    7,000      0     0    1076.3 12,212
-    1 customer_history   high_water        18,000   18,000      0     0    1545.1 21,216
-    1 customers          snapshot           5,000    5,000      0     0     810.5  9,527
-    1 transactions       high_water       250,000  250,000      0     0   17823.0 297,473
-    2 advances           change_tracking       50       20     30     0       8.8     87
+    1 advances           snapshot           8,000    8,000      0     0    1142.2 12,391
+    1 cards              snapshot           7,000    7,000      0     0    1076.3 11,939
+    1 customer_history   high_water        18,000   18,000      0     0    1545.1 21,553
+    1 customers          snapshot           5,000    5,000      0     0     810.5  9,265
+    1 transactions       high_water       250,000  250,000      0     0   17823.0 313,347
+    2 advances           change_tracking       50       20     30     0       8.8     88
     2 cards              change_tracking       30        0     30     0       4.6     67
-    2 customer_history   high_water         1,200    1,200      0     0     100.6  1,398
-    2 customers          change_tracking       99        1     85    13      14.4    186
-    2 transactions       high_water         2,800    2,800      0     0     199.5  3,283
+    2 customer_history   high_water         1,200    1,200      0     0     100.6  1,488
+    2 customers          change_tracking       99        1     85    13      14.4    197
+    2 transactions       high_water         2,800    2,800      0     0     199.5  3,428
     3 advances           change_tracking        1        1      0     0       0.2     12
     3 cards              change_tracking        1        0      0     1       0.0      8
-    3 customer_history   high_water           400      400      0     0      32.9    457
-    3 customers          change_tracking       24        0     20     4       3.2     55
-    3 transactions       high_water           900      900      0     0      64.3  1,035
-    4 advances           change_tracking        0        0      0     0       0.0      6
-    4 cards              change_tracking        0        0      0     0       0.0      6
-    4 customer_history   high_water             0        0      0     0       0.0      2
-    4 customers          change_tracking        0        0      0     0       0.0      7
-    4 transactions       high_water             0        0      0     0       0.0      2
+    3 customer_history   high_water           400      400      0     0      32.9    572
+    3 customers          change_tracking       24        0     20     4       3.2     57
+    3 transactions       high_water           900      900      0     0      64.3  1,139
+    4 advances           change_tracking        0        0      0     0       0.0     10
+    4 cards              change_tracking        0        0      0     0       0.0     10
+    4 customer_history   high_water             0        0      0     0       0.0      6
+    4 customers          change_tracking        0        0      0     0       0.0     10
+    4 transactions       high_water             0        0      0     0       0.0      5
 
 ====================================================================================================
   RECONCILIATION -- does the warehouse say what the source says?
