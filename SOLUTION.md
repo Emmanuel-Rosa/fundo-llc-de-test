@@ -1,225 +1,252 @@
 # SOLUTION
 
-All three problems attempted. Numbers are tagged **[M]** measured from run output or **[E]**
-estimated. `README.md` holds the full tables and the command-by-command output; this is the
-reasoning.
+I took on all three problems. Every number is marked **[measured]**, meaning it came out of a
+run, or **[estimated]**, meaning I'm reasoning rather than counting. `README.md` has the full
+tables and what each command prints. This is why I did it this way.
 
-## What I took on, and what I did not
+## What I skipped, and why
 
-**Skipped deliberately, because a confident guess costs more than an honest gap:**
+The brief says an honest gap costs less than a confident guess, so these come first.
 
-- **Duplicate *prevention* at the source.** The map is re-derived every run, so a duplicate
-  created tomorrow is merged tomorrow — that is detection. Prevention is a uniqueness control
-  on the proof key in the operational database, and it needs a writable source plus a product
-  decision about what happens at signup when it fires.
-- **Repairing malformed contacts** — found, counted and refused as evidence instead.
-- **Corroborating `funded` status.** `money_moved()` reads `status` only. Checking it against
-  `funded_at` and `repayment_account_hash` turns a veto into a judgement and every group it
-  moved would need re-scoring. The seam is named in the code, not crossed.
-- **Float reconciliation.** Two `FLOAT` columns are omitted from value parity **by type** —
-  stated, rather than reconciled with a tolerance and called a pass.
-
----
-
-## 1. Move only what changed
-
-**Two strategies, because one table dominates.** `transactions` is 86.8% of everything
-replicated and about 1.1% of the daily change **[M]** — that asymmetry is the whole argument for
-choosing per table rather than uniformly.
-
-Change Tracking for `customers`, `advances` and `cards`: rows mutate and get hard-deleted, and a
-change feed reports deletes where a watermark cannot. A bounded high-water mark on the clustered
-IDENTITY key for `transactions` and `customer_history`: append-only, so Change Tracking would
-buy per-row bookkeeping for rows that never update. `TRACK_COLUMNS_UPDATED = OFF` — current
-state, not an audit trail.
-
-**The watermark is the key, not a timestamp, and that is measured.** `posted_at` exists, is
-indexed, and is the obvious choice. It is also wrong: 150 of each day's 2,800 inserts are
-backdated, so a `posted_at` watermark silently loses **745 of 50,000** rows **[M]**.
-
-**Reliability.** Run 1 is a snapshot read, not a change-feed replay — capture is enabled *after*
-the seed, and `CHANGETABLE` from version 0 correctly returns nothing. The change-feed join is a
-`LEFT JOIN`: a deleted row is in `CHANGETABLE` and absent from the base table, so an inner join
-drops every delete while row counts still reconcile. Run 4 replays with zero churn and reads
-**0 rows, 0 bytes** **[M]**. And rows *and* watermarks commit in **one** transaction across
-all five tables, so a crash mid-run rolls back to a coherent point instead of leaving
-`customers` at version 51 and `advances` at 47 — a state no check can see and every mart is
-wrong about.
-
-**I changed my mind about the high-water mark, and this is the part I would want read.** Its
-docstring claimed the closed window made it safe. Two connections say otherwise: A inserts id 3
-and holds the transaction open, B inserts id 4 and commits, a snapshot then sees `[1, 2, 4]` and
-takes a ceiling of **4** — so row 3, once committed, sits permanently below the watermark
-carrying 50,000 cents **[M]**. An IDENTITY value is assigned at INSERT and made visible at
-COMMIT, and there is no `MIN_ACTIVE_IDENTITY`, so no choice of ceiling fixes it: the bound is on
-the wrong side of the hazard, and the lost row is a gap *inside* the window. Change Tracking is
-immune — its versions are assigned at commit. What ships is the bound **plus detection**: a
-contiguity check counting `COUNT(*)` against `MAX(id) - MIN(id) + 1`, reported as a heuristic
-because a rolled-back insert burns an id permanently. The claim had spread to five sites and is
-retracted in all of them; the probe is in `probes/`, so the retraction is reproducible.
+- **Stopping duplicates from being created again.** I rebuild the duplicate map from scratch
+  on every run, so a duplicate created tomorrow gets merged tomorrow. That catches them, it
+  doesn't prevent them. Preventing them means a uniqueness rule inside the operational
+  database, which needs write access to it and a product decision about what a customer sees
+  when signup gets blocked.
+- **Fixing bad phone numbers and emails.** I find them, count them, and refuse to use them.
+  Reasoning below.
+- **Double-checking whether "funded" is really funded.** The code trusts the `status` column.
+  Checking it against the funding date and the repayment account as well would turn a hard rule
+  into a judgement call, and every group it changed would need re-scoring. I marked the spot in
+  the code and left it.
+- **Comparing the two floating-point columns.** Floats don't add up identically on two
+  different database engines, so I skip those two and say so rather than comparing them with a
+  tolerance and calling it a pass.
 
 ---
 
-## 2. Resolve duplicate customers
+## 1. Copying only what changed
 
-**The merge is indirection, never mutation.** `meta.customer_map` maps each customer to a
-canonical id; no source row is rewritten or deleted, so an unmerge is a one-row edit. That
-matters because every rule below is a judgement that can be wrong.
+**I use two strategies because one table dominates.** `transactions` holds 86.8% of all the
+rows, and only about 1.1% of it changes on a given day **[measured]**. That imbalance is the
+whole argument for choosing per table rather than picking one approach for everything.
 
-**Proves:** `customer_id`, the tuple `(ssn_last4, date_of_birth, last_name)`, a prior human
-`manual_merge`. **Suggests:** email, phone, postal address, a shared card fingerprint.
+For `customers`, `advances` and `cards` I use SQL Server's Change Tracking, which keeps a list
+of the rows that changed since you last asked. Those tables get edited and rows get deleted,
+and the list includes deletes. A "highest ID I've seen" marker can't tell you about a delete,
+because a deleted row doesn't get a new ID. For `transactions` and `customer_history`, which
+are only ever inserted into, I use that ID marker instead. Change Tracking there would mean the
+database keeping per-row records for rows that never change.
 
-Email is the trap, priced rather than argued: promoting it to *proves* introduces 2 wrong
-pairs and recovers 2 true ones — precision 1.000 → 0.961 **[M]**. A household shares a
-mailbox, so email identifies a *mailbox*, not a person. First name is excluded (nicknames are
-not evidence); surname is included, and dropping it costs 1 wrong pair for 1 recovered
-**[M]** — the marriage-rename case bought by paying with two strangers who share `ssn_last4`
-and `date_of_birth`. Placeholders are caught by **shape**, never a blocklist, because an
-unrecognised placeholder is treated as strong evidence and merges strangers.
+**The marker is the ID column, not the timestamp, and I checked before deciding.** There's a
+`posted_at` timestamp that's indexed and looks like the obvious choice. It's wrong. About 150 of
+each day's 2,800 inserts are backdated, so their timestamp lands below rows that were already
+copied. Of the 3,700 rows that arrived after the initial load, a timestamp-based marker would
+have silently missed **129** of them: 84 on day one, 45 on day two **[measured]**.
 
-**Funded or paid-off is untouchable.** A money-moved customer is never auto-excluded, and a
-group with **two** money-moved members is not merged at all — I do not guess. The merge is
-**withdrawn** and a review row filed; across churn, rows merged away go 42 → 39 and review rows
-4 → 5 **[M]**. The review row carries each member's repayment-account hash *whole*, because the
-reviewer's real question is whether they repay from the same account: two funded members with
-overlapping windows on *different* accounts is a first-party fraud signal for a cash-advance
-lender, not a data-quality ticket.
+**Reliability.** The first load reads everything directly rather than replaying the change
+list, because change tracking is switched on *after* the data is seeded, so asking it for
+"everything since the beginning" correctly returns nothing. Deletes are the reason the query
+uses an outer join: a deleted row appears in the change list but no longer exists in the table,
+so a plain inner join would throw every delete away silently. Running it again with nothing
+changed reads **0 rows** **[measured]**. And the copied rows and the updated markers are saved
+in **one transaction** across all five tables. A crash halfway through rolls back to a
+consistent point rather than leaving one table further ahead than another. No check can detect
+that state, and every report built on top of it would be wrong.
 
-**Test data is excluded, not merged — and the naive pattern really does catch real people.**
-Three rules ship: internal domain *with* an anchored automation local part; a `+test`/`+qa`
-subaddress tag; canonical artifact values. Result: 14 excluded, 2 more money-vetoed **[M]**. Run
-as a counterfactual, the naive `'%test%'` filter flags 14 customers of which **7 are real
-people** — including a funded Marcus **Testerman** — precision 0.500 **[M]**. Staff at the
-company domain survive because rule A needs the domain *and* an anchored local part.
-
-**Malformed contacts: found, counted, refused.** Four states, not two, and `placeholder` is the
-dangerous one — `5555555555` passes every shape check and identifies nobody. Over a population
-of 4,970: **6 malformed phones and 1 placeholder email** **[M]** — exactly the 7 canonical
-customers reported as carrying a bad contact. The decision is to **refuse them as identity
-evidence, repair nothing, drop nothing**: repairing a phone invents a way to contact somebody,
-dropping the row loses a real customer, and refusing the field costs only the matches that
-field would have made — precisely the matches that should not be made on a broken value. The
-cost is counted too: the survivor's row is taken whole, so one canonical customer keeps a
-malformed phone a merged-away duplicate had valid. Stitching a "best" record from several rows
-produces a customer who never existed.
-
-**Cards end up where they already were, and the number surprised me.** A card keeps its
-`customer_id` and reaches its person *through* the map — the same indirection as the merge — so
-an unmerge needs no card restore. In the source, **0** customers hold more than one default card
-**[M]**. After resolution, **27** canonical customers do, and **all 27 span more than one
-original customer** **[M]**. Every conflict is created by the merge; none is pre-existing dirt.
-Two people who each chose their own default card become one person with two, and nothing can say
-which card a charge should hit. It is reported split by cause and deliberately **not** repaired:
-choosing between two customer-chosen default cards is the billing owner's decision, and silently
-picking one would be the pipeline making a financial call nobody asked it to make. Of everything
-here, this is what I would put in front of the business first.
-
-**Result.** 4,984 mirror customers → **4,970** reaching resolution. Truth holds 41 duplicate
-groups over 91 rows containing 61 pairs; the resolver forms 35 groups. Shipped: **47 proposed,
-47 correct, 0 wrong, 14 missed → precision 1.000, recall 0.770** **[M]**.
-
-**The precision figure is a self-consistency check, not a measurement.** It says the resolver
-proposed nothing the seeded truth disagrees with. It cannot say these rules hold on your real
-book — only a labelled sample of your real duplicates could. Recall is the more useful number,
-and it is the lower one. The 14 misses are partitioned by cause from the run with nothing
-unexplained: 4 have no proof tuple, 2 have tuples that disagree, 8 are refusals the resolver
-*chose* **[M]**.
+**I changed my mind about the ID marker.** The code used to claim it was safe under
+concurrent writes. It isn't: SQL Server assigns an ID when a row is inserted, but the row only
+becomes visible when its transaction commits, and those are different moments. So a reader can
+miss a low ID while a higher one is already visible, record the higher one as its marker, and
+never come back for the row it missed — 50,000 cents in the row I tested with **[measured]**.
+Picking a smarter marker doesn't help; SQL Server has a function built for this problem but
+only for `rowversion` columns, not ID columns. Change Tracking doesn't have the issue at all,
+because its version numbers are handed out at commit time, but switching the two big tables to
+it brings back the per-row cost I was avoiding. So what ships is the marker **plus a check that
+detects the gap**: count the rows and compare against the range of IDs they cover. That's a
+strong hint rather than proof, because a rolled-back insert also uses up an ID, and the check
+says so. The script that proved all this is in `probes/`.
 
 ---
 
-## 3. Prove the data is correct
+## 2. Duplicate customers
 
-Five checks, both sides read, one table — and **three verdicts** rather than two. `PASS`;
-`SOURCE-DIRTY`, where the two sides agree and what they agree on is bad data the source really
-holds; and `FAIL`. Only `FAIL` exits non-zero.
+**Merging never edits or deletes a customer record.** A separate table says which customer ID
+stands for which person, so undoing a merge is one row. That matters because every rule below is
+a judgement, and judgements are sometimes wrong.
 
-The middle verdict is the design decision. A clean run ends SOURCE-DIRTY: the source orphans 13
-card, 17 transaction and 20 history rows whose parents were hard-deleted, **on both sides**
-**[M]**. Two-valued, every clean run fails on those, which forces a hardcoded expected-orphan
-constant — and a stale constant is how an earlier version of the scoring code came to print a
-fabricated discrepancy against a correct run.
+**What proves identity:** the customer ID; the combination of last-4 of SSN, date of birth and
+surname; or a human who already merged them by hand. **What only hints at it:** email, phone,
+postal address, and two records sharing a saved card.
 
-Completeness is reported as **missing, extra and matched — never one netted number**, because one
-lost row plus one stale row net to a count that matches exactly while two rows are wrong.
-Aggregates first, full key sets only where the scalars disagree. Every check also prints what
-it *cannot* see — a check that hides its limits gets trusted past them.
+Email is the trap and I priced it rather than arguing about it. Treating email as proof finds 2
+more real duplicates and wrongly merges 2 pairs who aren't the same person **[measured]**.
+Households share a mailbox, so an email address identifies a mailbox. First names are out,
+because nicknames aren't evidence. Surnames are in, and taking them out costs 1 wrong merge for
+1 correct one **[measured]**: you catch someone who changed their name after marriage by
+accepting that two strangers sharing a birth date and four SSN digits get merged. Placeholder
+values are caught by their shape rather than by a list of known-bad ones. A list is something
+someone has to maintain, and when it misses one the failure is silent: an unrecognised
+placeholder looks like strong evidence and merges strangers.
 
-**Breaking it on purpose** is the one extra command. Two historical amounts are rewritten in
-place; the loader then reads **0 rows**, because no id moved — a spotless load report over a
-wrong warehouse — and the scorecard FAILs, naming the column, the 37,655-cent shortfall and the
-two rows **[M]**. Then the sharper half: the same two rows *swap* amounts, so COUNT, SUM, MIN and
-MAX are identical by construction and every aggregate check passes with the corruption still
-present **[M]**. That blind spot was documented in two modules before it was ever executed, and a
-documented limitation nobody ran is a claim rather than a finding. Both restores write back
-values that were read, not hardcoded, and verify by re-reading.
+**Funded customers are untouchable.** Anyone who has moved money is never auto-excluded as test
+data. When a group contains *two* people who have both moved money, I don't merge it and I don't
+guess. The merge is withdrawn and it goes to a person. You can watch it happen across the two
+simulated days: merged-away records go 42 → 39 and the review queue goes 4 → 5 **[measured]**.
+The review note carries each person's full repayment-account fingerprint, which is a stable
+identifier for the bank account repayments come from. The question a human needs to answer is
+whether these two repay from the *same* account: two funded people on different accounts with
+overlapping dates is a fraud signal for a cash-advance lender rather than a data-cleanup ticket.
+
+**Test data is excluded, not merged, and the obvious pattern really does catch real people.**
+My version needs a company-domain email *and* an automation-shaped name before the @, or a
+`+test`/`+qa` tag, or placeholder values like SSN `0000` with a 1900 birth date. That excludes
+14 accounts and vetoes 2 more for having moved money **[measured]**. I then ran the naive
+`LIKE '%test%'` version as a comparison: it flags 14 customers and **7 of them are real
+people**, so half of what it catches is wrong, and one of the wrong ones has a funded advance
+**[measured]**.
+
+**Bad phone numbers and emails: found, counted, refused.** Four categories rather than two,
+because `placeholder` is the dangerous one: `5555555555` is a perfectly well-formed number that
+identifies nobody. Out of 4,970 customers there are **6 malformed phone numbers and 1
+placeholder email** **[measured]**, and those are 7 different people — nobody here has both
+problems. I refuse them as evidence of identity, fix nothing, and drop nothing. Refusing the
+field only costs the matches that field would have made, and those are exactly the matches you
+shouldn't make on a broken value. That choice has a price and I count it too: when records
+merge, the survivor's details are kept whole rather than assembled from the best parts of each,
+so one surviving customer keeps a broken phone number that a merged-away duplicate had valid.
+
+**Cards stay where they are, and here a number surprised me.** A card keeps pointing at the
+customer it was added to and reaches the right person through the same mapping table, so undoing
+a merge doesn't need to undo anything about cards.
+
+What breaks if you get this wrong, as a number rather than a warning: in the source database
+**no customer has two default cards** **[measured]**. After merging, **27 customers do, and
+every one of those comes from two people being merged into one** **[measured]**. None of it was
+pre-existing mess. Nothing can then say which card to charge. I report it and deliberately don't
+fix it, because choosing between two cards a customer picked is a billing decision, and having
+the pipeline quietly pick one would mean it deciding something about a customer's money that
+nobody asked it to decide. Of everything here, that's the one I'd take to you rather than settle
+myself.
+
+**The result.** 4,984 customers in the warehouse, 4,970 considered after exclusions. The data
+really contains 41 duplicate groups covering 91 records and 61 pairs; the resolver finds 35
+groups. It proposed **47 pairs, 47 of them correct, 0 wrong, 14 missed — precision 1.000, recall
+0.770** **[measured on my own test data, which is the caveat below]**. Precision is how often a
+proposed merge was right; recall is how many of the real duplicates it found.
+
+**That precision figure is a consistency check, not a measurement.** It means the resolver
+proposed nothing my test data disagrees with. It says nothing about how these rules would do on
+your real customers. Only labelling a sample of your actual duplicates would tell you that, and
+that's in the production section below. Recall is the more useful number and it's the lower one.
+The 14 misses are broken down by cause from the run itself, with none unexplained: 4 have no
+usable identifying fields, 2 have fields that contradict each other, and 8 are cases the
+resolver deliberately refused **[measured]**.
 
 ---
 
-## Cost impact
+## 3. Proving the data is right
 
-**Today**, a full daily copy to detect ~1% change pays four times: a full-table read against the
-operational server every night (contention before it is a dollar), egress, the load, and
-storage.
+Five checks that read *both* databases, one summary table, and three possible results rather
+than two: pass; **source-dirty**, meaning the two sides agree and what they agree on is bad data
+that really is in the source; and fail. Only fail exits non-zero.
 
-**Measured:** a day's delta moves **1.46%** of a full copy's bytes — a **68×** reduction — and
-a zero-churn replay moves nothing **[M]**. Payload is values transferred, excluding TDS framing
-and TLS: a floor, and the right basis for a ratio because both sides are measured the same way.
+The middle result is the design decision. A clean run here ends source-dirty, because the source
+has 13 card rows, 17 transaction rows and 20 history rows whose customer was deleted, and all of
+them are orphaned in *both* databases **[measured]**. With only pass and fail, every clean run
+would fail on those, and the usual fix is to hardcode "expect 20 orphans" — a number that goes
+stale the first time the data moves. An earlier version of this code did that and printed a
+discrepancy that wasn't real.
 
-**The part that inverts the naive conclusion.** "Loading into BigQuery is free" is true — batch
-loads are not billed. But an upsert is a `MERGE`, and **`MERGE` is billed as a query**. An
-unpruned `MERGE` scans the *entire target table* daily, so a pipeline congratulating itself on a
-free load has swapped it for a billed full scan of the destination that grows with total history
-rather than with today's change. **Extracting incrementally does not by itself make the bill
-incremental.** The fix is a static partition filter in the `MERGE` predicate so BigQuery can
-prune, plus skipping `MERGE` entirely for append-only tables and appending, which is free — which
-is why `transactions` and `customer_history` never touch the upsert path here.
+Completeness is reported as missing, extra, and matched, never as one combined number, because
+one missing row and one extra row cancel out: the total matches and two rows are still wrong.
+The checks compare cheap summaries first and only pull every row for a table whose summaries
+already disagree. Each one also prints what it can't catch.
 
-**What I cannot tell you:** there is no BigQuery in this exercise, so any dollar figure would be
-**[E]**. Before promising a saving I would want your daily bytes loaded, whether the apply is
-`MERGE` or truncate-and-load, whether the targets are partitioned, and the query/storage split.
+**Breaking it on purpose** is the one extra command. It edits two old amounts; the loader then
+reads 0 rows, because editing a row doesn't change its ID, so you get a spotless load report
+over a warehouse that's now wrong, and the checks fail naming the column and the two rows
+**[measured]**. Then it swaps the two amounts instead, which leaves the count, total, minimum
+and maximum all unchanged — every check passes with the corruption still sitting there
+**[measured]**. That limitation was written down in two files before anyone ran it, and
+something written down but never run is a claim rather than a finding.
+
+---
+
+## Cost
+
+**What you're paying for now.** Copying the whole database nightly to find a 1% change bills you
+four times over: the full read of the operational database, the cost of moving the data out, the
+load, and storage.
+
+**What I measured:** the busier of two simulated days moves **1.46%** of what a full copy moves,
+about **68× less**; the quieter day is 0.45%. Running it again with nothing changed moves nothing
+**[measured]**. That figure counts values transferred and excludes protocol and encryption
+overhead, so it's a floor, and it's a fair comparison because both sides are counted the same
+way.
+
+**And here's the part that turns the obvious conclusion upside down.** "Loading into BigQuery is
+free" is true — batch loads aren't billed. But applying updates means a `MERGE`, and **`MERGE`
+is billed as a query.** A `MERGE` that can't narrow itself down scans the *whole destination
+table* every single day. So a pipeline congratulating itself on a free load has quietly swapped
+it for a billed full scan of the destination, and that scan grows with your total history rather
+than with today's changes. **Copying incrementally does not by itself make the bill
+incremental.** The fix is writing the `MERGE` so BigQuery can skip most of the table — which
+needs the destination split by date, so a query can ignore old partitions — and for tables that
+are only ever inserted into, skipping `MERGE` altogether and just appending, which is free.
+That's why the two big tables here never go through the update path.
+
+**What I can't tell you.** There's no BigQuery in this exercise, so any dollar figure would be
+**[estimated]**, and I'd rather hand you the ratio I measured and the cost model to check.
+Before promising a saving I'd want your daily volume loaded, whether you apply changes with
+`MERGE` or by replacing the table, whether the destination tables are split by date, and how
+much of today's bill is query versus storage.
 
 ---
 
 ## How this was built
 
-Built with agents executing against written contracts. The architecture, the schema and each
-deliberate defect in it, the capture strategy, the identity rules and their precedences, and the
-verification are mine. Generated code was treated as unverified until it ran, and that is where
-the value was: card-id arithmetic that was unsatisfiable, so a bulk insert produced zero rows
-*while reporting success*. Measurement caught what reading did not — one salted hash reused
-across two identity fields, so a matching SSN mathematically forced a matching surname.
+I wrote the specs; AI agents did the typing. The architecture, the schema and its deliberate
+flaws, the capture strategy, the identity rules and which of them outranks which, and all the
+verification are mine. I treated generated code as unverified until it ran, which is where the
+value was: one bulk insert created zero rows *while reporting success*, and a hash reused across
+two identity fields meant a matching SSN mathematically forced a matching surname.
 
-**The two worst defects were false claims, not broken code.** The high-water docstring asserted
-an immunity it did not have. And `docker compose up` had never once run the demo: the service
-`command` duplicated the image's `ENTRYPOINT`, so `argv[1]` was `"python"` — it printed help
-and exited 2 **[M]**. Every prior run had used an entrypoint override, so nothing caught it.
-**Anything advertised and never executed is presumed broken** — which is also why the 465 tests
-no command invoked now run first, before the source build.
+**The two worst problems were false claims rather than broken code.** The ID-marker code
+asserted a safety property it didn't have. And `docker compose up` — the first line of the
+instructions — had never once actually run: the container config repeated a command already
+built into the image, so the program received the word "python" as its argument, printed its own
+help, and exited **[measured]**. Every run in the project's history had used an override that
+bypassed it, so nothing caught it.
 
-Generation is the cheap step. Specifying and verifying is the work.
+The rule I took from that: anything you advertise and never execute is broken until proven
+otherwise. It's why the tests that no command invoked now run first, and why a cold-start bug
+that appeared or didn't depending on how fast the database started now has a test of its own.
 
 ---
 
-## How this becomes production
+## Making this production
 
-**Tools.** Keep Change Tracking over CDC: CDC buys per-column history at the cost of a capture
-job, log reader and retention window, and nothing downstream needs an audit trail — it needs
-current state. For the append-only tables, move the watermark from IDENTITY to **`rowversion`
-with `MIN_ACTIVE_ROWVERSION()`**, the one mechanism that closes the concurrency hole above; that
-is the single change I would make before trusting this under real write concurrency. dbt for
-transformations *after* the raw layer, not for the extract. The checks stay plain code with exit
-codes.
+**Tools.** I'd keep Change Tracking rather than move to Change Data Capture, SQL Server's
+heavier alternative: CDC gives you per-column history and costs you a capture job, a log reader
+and a retention window to operate, and nothing downstream needs history — it needs current
+state. For the two append-only tables I'd move the marker from the ID column to `rowversion`, a
+column type SQL Server updates itself and which comes with the function that closes the
+concurrency hole above. That's the single change I'd make before trusting this with several
+writers. Whatever you already use for scheduling. dbt, the standard SQL transformation tool, for
+the work *after* the raw layer — not for the extract, which does things dbt isn't for. The
+checks stay as plain code with exit codes.
 
-**One-time:** the backfill, the seed, enabling capture, and a labelling exercise on real
-duplicates — the only thing that can turn that precision self-consistency check into a
-measurement. **Permanent:** the incremental load, the resolver (re-derived every run, never
-patched forward), the scorecard on a schedule with its exit code wired to alerting, and the
-review queue — which needs an owner, because a queue nobody reads is worse than no queue.
+**One-time versus permanent.** One-time: the initial backfill, the seed, switching on change
+tracking, and labelling a sample of your real duplicates, which is the only thing that turns my
+consistency check into an actual measurement. Permanent: the incremental load, the resolver
+(rebuilt every run, never patched), the checks on a schedule with the exit code wired to
+whatever pages someone, and the review queue, which needs a named owner.
 
-**First, I would ship the scorecard — before the incremental load.** It is the smallest piece, it
-is independent of the capture strategy, and it answers the pain you called *no trust*. Run it
-against the pipeline you have today and it tells you whether the full copy you are already
-paying for is actually complete. If it is not, that is worth knowing before optimising the thing
-that produces it; if it is, you have a regression test to hold the migration to. Shipping the
-incremental load first changes the pipeline and the trust mechanism at once, and if the numbers
-move you will not know which one did it.
+**What I'd ship first: the checks, before the incremental load.** They're the smallest piece,
+they don't depend on how you capture changes, and they answer the problem you described as *no
+trust*. Point them at the pipeline you have today and they'll tell you whether the full copy
+you're already paying for is actually complete. If it isn't, that's worth knowing before you
+optimise the thing producing it. If it is, you now have a regression test to hold the migration
+to. Shipping the incremental load first changes the pipeline and the thing that measures the
+pipeline at the same time, and if the numbers move you won't know which change did it.

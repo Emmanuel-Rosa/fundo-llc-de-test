@@ -95,8 +95,14 @@ tables:
   #
   # The watermark is the clustered IDENTITY key, NOT a timestamp. posted_at exists and
   # is indexed and is the obvious choice, and it is wrong: it is not monotonic with the
-  # key, because 150 of each day's 2,800 inserts are backdated. A posted_at watermark
-  # loses 5.4% of each day's rows, permanently, with no error.
+  # key, because 150 of each day's 2,800 inserts are backdated -- 5.4%.
+  #
+  # WHAT THAT COSTS IS A SMALLER NUMBER, AND SAYING 5.4% WAS OVERSTATING IT. A backdated
+  # row is only lost if its timestamp falls below the PREVIOUS run's mark, not merely
+  # below the newest row. Measured over the demo's own runs: 84 of day one's 2,800 and 45
+  # of day two's 900, so 129 of the 3,700 rows arriving after the initial load -- 3.5%,
+  # permanently, with no error. The distinction matters because the honest number is the
+  # one a reviewer can reproduce from ops.load_run.
   #
   # "Bounded" is load-bearing, and it is the bug this exercise is most likely to be
   # testing. `WHERE id > last_id` looks obviously safe and is not: an IDENTITY value is

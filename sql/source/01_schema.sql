@@ -134,8 +134,10 @@ CREATE TABLE dbo.transactions (
                                             -- Contrast advances.principal_amount above.
     currency       CHAR(3)      NOT NULL CONSTRAINT df_txn_ccy DEFAULT ('USD'),
     posted_at      DATETIME2(3) NOT NULL,   -- TRAP: not monotonic with transaction_id. 150 of
-                                            -- each day's 2,800 inserts are backdated, so a
-                                            -- posted_at watermark loses 5.4% per day.
+                                            -- each day's 2,800 inserts are backdated (5.4%).
+                                            -- A posted_at watermark loses the subset landing
+                                            -- below the PREVIOUS mark: measured, 129 of the
+                                            -- 3,700 rows that arrive after the first load.
     created_at     DATETIME2(3) NOT NULL CONSTRAINT df_txn_created DEFAULT (SYSUTCDATETIME()),
     -- Deliberately NO updated_at. The append-only contract is a schema fact here, not a
     -- comment -- and the break demo violates it in place to prove the strategy is blind

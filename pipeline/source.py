@@ -110,11 +110,22 @@ class Source:
         healthcheck condition. The loop distinguishes "not up yet" from "up and
         rejecting me", because retrying a bad password for three minutes and then
         reporting a timeout sends the reader looking in entirely the wrong place.
+
+        A REJECTED LOGIN IS RETRIED, but on its own shorter budget, and that distinction
+        was bought the hard way. This method used to treat any 18456 as fatal on the
+        reasoning that a server answering with "login failed" is up, so retrying cannot
+        help. True for a wrong password; false for the first few seconds on a fresh data
+        volume, where SQL Server listens on 1433 while it is still creating its system
+        databases and fails logins with 18456 State 7, "an error occurred while
+        evaluating the password". Measured: a clean `down -v` then `up` hit it two
+        seconds in and the whole run died after 11. The same code had passed several
+        times before on nothing but timing.
         """
         target_db = database or self._config.database
         deadline = time.monotonic() + (self._config.connect_timeout_seconds if wait else 0)
         attempt = 0
         last_error: Exception | None = None
+        first_login_failure: float | None = None
 
         while True:
             attempt += 1
@@ -135,12 +146,29 @@ class Source:
                 last_error = exc
                 message = str(exc)
 
-                # Login failed / password rejected: the server is up and answering.
-                # Retrying cannot help, and pretending it might buries the real cause.
+                # A rejected login is retried, but only inside login_grace_seconds.
+                # See this method's docstring: for the first few seconds on a fresh
+                # volume this means "still starting", and after that it means the
+                # password really is wrong. Both get the diagnosis they deserve.
                 if "Login failed" in message or "18456" in message:
+                    now = time.monotonic()
+                    if first_login_failure is None:
+                        first_login_failure = now
+                        print(
+                            f"  SQL Server is answering but rejecting the login; on a "
+                            f"fresh volume it does that for a few seconds while it "
+                            f"creates its system databases. Retrying for up to "
+                            f"{self._config.login_grace_seconds:.0f}s.",
+                            flush=True,
+                        )
+                    if (now - first_login_failure) < self._config.login_grace_seconds \
+                            and now < deadline:
+                        time.sleep(self._config.connect_retry_interval_seconds)
+                        continue
                     raise SystemExit(
-                        f"SQL Server rejected the login for user "
-                        f"{self._config.user!r}.\n"
+                        f"SQL Server kept rejecting the login for user "
+                        f"{self._config.user!r} for "
+                        f"{self._config.login_grace_seconds:.0f}s.\n"
                         f"  Check MSSQL_SA_PASSWORD in .env matches what the mssql "
                         f"container was started with. If you changed it after the first "
                         f"`up`, the password is baked into the existing data volume -- "

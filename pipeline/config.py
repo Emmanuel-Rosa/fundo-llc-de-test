@@ -56,6 +56,24 @@ class SourceConfig:
     connect_timeout_seconds: int = 180
     connect_retry_interval_seconds: float = 2.0
 
+    # How long to keep retrying a REJECTED LOGIN before calling it a bad password.
+    #
+    # A separate budget from the one above, because the two failures mean different
+    # things and the right answer for each is different. A refused connection means
+    # "not up yet" and deserves the full 180s. A rejected login usually means the
+    # password is wrong -- but on a FRESH volume it also happens for a few seconds
+    # while SQL Server creates its system databases: it is listening on 1433 and
+    # answering, and it fails the login with 18456 State 7, "an error occurred while
+    # evaluating the password". Measured: a clean `down -v` then `up` hit exactly that
+    # two seconds after the server started logging, and the run died in 11 seconds.
+    #
+    # The client cannot distinguish the cases -- SQL Server logs State 7 for starting
+    # and State 8 for a real mismatch, and pymssql surfaces neither, only 18456. So
+    # this is a bounded grace window and not a cleverer predicate. 60s covers a cold
+    # start with room to spare, and a genuinely wrong password still gets a precise
+    # diagnosis rather than a timeout -- one minute later than it used to.
+    login_grace_seconds: float = 60.0
+
     @classmethod
     def from_env(cls) -> "SourceConfig":
         return cls(
